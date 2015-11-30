@@ -1,0 +1,23 @@
+<html>
+    <head>
+        <title>WiFi Shutter Configurator</title>
+    </head>
+    <body>
+        <h2>Welcome to WiFi Shutter Configurator</h2>
+        
+        <p>Please enter the following configurations:</p>
+        
+        <form action="/configure" method="post">
+            <p>WiFi:&nbsp;<input maxlength="30" name="WIFI_NAME" type="text" /></p>
+            
+            <div>WiFi Passsword:&nbsp;<input maxlength="30" name="WIFI_PASSWORD" type="password" /></div>
+            
+            <p>Shutter Friendly Name:&nbsp;<input maxlength="10" name="MDNS_NAME" type="text" /></p>
+            
+            <p>Shutter Roll Time (seconds):&nbsp;<input maxlength="10" name="ROLL_TIME" type="text" value="10" /></p>
+            
+            <p><input name="Submit" type="submit" value="Configure" />&nbsp;<input type="reset" value="Clear" /></p>
+        </form>
+        
+    </body>
+</html>
