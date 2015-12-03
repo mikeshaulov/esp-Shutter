@@ -9,6 +9,7 @@
 
 #define DEBUG(x) Serial.println(x)
 #define MAX_WIFI_CONNECT_RETRY 20
+#define MAX_WIFI_RECONNECT_RETRY 500
 
 #include <ESP8266WiFi.h>
 #include <ESP8266WiFiMulti.h>
@@ -39,22 +40,22 @@ class CShutter
 
     CReverseSwitch m_up;
     CReverseSwitch m_down;
-    CLed m_led;
+    CBaseSwitch* m_led;
 
     void setState(STATE newState, bool up, bool down, bool led)
     {
       m_currState = newState;
       m_up.TurnBool(up);
       m_down.TurnBool(down);
-      m_led.TurnBool(led);
+      m_led->TurnBool(led);
       m_lastActionTime = millis();
     }
   
   public:  
-    CShutter(int pinUp, int pinDown, int pinLed, int timeToRoll) :
+    CShutter(int pinUp, int pinDown, CBaseSwitch* pLed, int timeToRoll) :
       m_up(pinUp), 
       m_down(pinDown), 
-      m_led(pinLed), 
+      m_led(pLed), 
       m_timeToRoll(timeToRoll),
       m_currState(STATE::off) {}
 
@@ -96,6 +97,8 @@ class CShutter
     }
 
     STATE getState() const {return m_currState;}
+
+    void setTimeToRoll(int timeRoll) {m_timeToRoll = timeRoll;} 
 };
 
 
@@ -103,8 +106,13 @@ class CShutter
   Program objects
 */
 
-CShutter shutter(4,5,14,10000);
+CReverseSwitch greenLed(12);
+CReverseSwitch redLed(13);
+CReverseSwitch blueLed(14);
+
+CShutter shutter(4,5,&greenLed,10000);
 bool bConnected = false;
+int reconnect_retry;
 ESP8266WebServer webServer(80);
 IniFile iniFile(CFG_INI_FILE);
 
@@ -122,14 +130,18 @@ void mountFS()
 void connectToWiFi()
 {
     int retries = 0;
-  
+
+    bool blueLedState = false;
     while ((WiFi.status() != WL_CONNECTED) && (retries++ < MAX_WIFI_CONNECT_RETRY)) {
+      blueLedState = !blueLedState;
+      blueLed.TurnBool(blueLedState);
       delay(500);
       Serial.print(".");
     }
 
     if(WiFi.status() != WL_CONNECTED)
     {
+      onSetError();
       DEBUG("max retries reached, clearing settings and restarting");
       iniFile.clearAll();
       ESP.restart();
@@ -138,6 +150,7 @@ void connectToWiFi()
     DEBUG("WiFi connected");
     DEBUG("IP address: ");
     DEBUG(WiFi.localIP());  
+    blueLed.TurnOff();
 }
 
 void printFSRoot()
@@ -151,10 +164,12 @@ void printFSRoot()
 
 void startCaptive()
 {
+    blueLed.TurnOn();
     bConnected = false;
     DEBUG("failed to load WiFi settings - setting captive AP");
     WiFiAPCaptive captive("new_shutter_cfg",&iniFile);
     captive.start();
+    blueLed.TurnOff();
 }
 
 void setup() {
@@ -162,6 +177,7 @@ void setup() {
 
   Serial.begin(115200);
   mountFS();
+  reconnect_retry = 0;
 
   printFSRoot();
 
@@ -199,11 +215,58 @@ void setup() {
   else{
     DEBUG("mDNS responder started");
   }
+
+  int rollTimeInSeconds = iniFile.getValue("ROLL_TIME").toInt();
+  // check if error 
+  if(rollTimeInSeconds == 0 )
+  {
+    DEBUG("failed to convert roll time" + iniFile.getValue("ROLL_TIME"));
+    onSetError();
+  }
+  else{
+    DEBUG("setting new roll time [SEC] " + String(rollTimeInSeconds,DEC));
+    shutter.setTimeToRoll(rollTimeInSeconds * 1000);
+  }
+  
   
   // begin WebServer
   webServer.on("/up",handleRollUp);
   webServer.on("/off",handleOff);    
   webServer.on("/down",handleRollDown);
+
+  webServer.onFileUpload([](){
+      if(webServer.uri() != "/update") return;
+      HTTPUpload& upload = webServer.upload();
+      if(upload.status == UPLOAD_FILE_START){
+        Serial.setDebugOutput(true);
+        WiFiUDP::stopAll();
+        Serial.printf("Update: %s\n", upload.filename.c_str());
+        uint32_t maxSketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
+        if(!Update.begin(maxSketchSpace)){//start with max available size
+          Update.printError(Serial);
+        }
+      } else if(upload.status == UPLOAD_FILE_WRITE){
+        if(Update.write(upload.buf, upload.currentSize) != upload.currentSize){
+          Update.printError(Serial);
+        }
+      } else if(upload.status == UPLOAD_FILE_END){
+        if(Update.end(true)){ //true to set the size to the current progress
+          Serial.printf("Update Success: %u\nRebooting...\n", upload.totalSize);
+        } else {
+          Update.printError(Serial);
+        }
+        Serial.setDebugOutput(false);
+      }
+      yield();
+    });
+
+    webServer.on("/update", HTTP_POST, [](){
+      webServer.sendHeader("Connection", "close");
+      webServer.sendHeader("Access-Control-Allow-Origin", "*");
+      webServer.send(200, "text/plain", (Update.hasError())?"FAIL":"OK");
+      ESP.restart();
+    });
+  
   webServer.begin();
   
   // Add service to MDNS-SD
@@ -215,14 +278,23 @@ void loop() {
   
   if(WiFi.status() != WL_CONNECTED)
   {
-    DEBUG("WiFi connection lost - restarting ESP");
-    bConnected = false;
-    // restart to initiate reconnecting loop
-    ESP.restart();
+    onSetError();
+    DEBUG("WiFi connection lost - restarting ESP, [status] " + String(WiFi.status(), DEC));
+    if(reconnect_retry++ > MAX_WIFI_RECONNECT_RETRY)
+    {
+      bConnected = false;
+      // restart to initiate reconnecting loop
+      ESP.restart();
+    }
   }
   else
   {
+    onClearError();
+    reconnect_retry = 0;
     webServer.handleClient();
     shutter.onLoop();
   }
 }
+
+void onSetError(){redLed.TurnOn();}
+void onClearError(){redLed.TurnOff();}
